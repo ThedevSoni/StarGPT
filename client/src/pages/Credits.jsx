@@ -1,14 +1,43 @@
 import React, { useEffect, useState } from 'react'
 import { dummyPlans } from '../assets/assets'
 import Loading from './Loading'
+import toast from 'react-hot-toast'
+import { useAppContext } from '../context/AppContext'   // <-- yeh add karo
 
 const Credits = () => {
   const [plans, setPlans] = useState([])
   const [loading, setLoading] = useState(true)
+  const { token, axios } = useAppContext()   // <-- ab yeh sahi chalega
 
   const fetchPlans = async () => {
-    setPlans(dummyPlans)
+    try {
+      const { data } = await axios.get('/api/credit/plan', {
+        headers: { Authorization: token }
+      })
+      if (data.success) {
+        setPlans(data.plans)
+      } else {
+        toast.error(data.message || 'Failed to fetch plans')
+      }
+    } catch (error) {
+      toast.error(error.message)
+    }
     setLoading(false)
+  }
+
+  const purchasePlan = async (planId) => {
+    try {
+      const { data } = await axios.post('/api/credit/purchase', { planId }, {
+        headers: { Authorization: token }
+      })
+      if (data.success) {
+        window.location.href = data.url
+      } else {
+        toast.error(data.message)
+      }
+    } catch (error) {
+      toast.error(error.message)
+    }
   }
 
   useEffect(() => {
@@ -54,7 +83,11 @@ const Credits = () => {
             </div>
 
             {/* Buy button */}
-            <button
+            <button onClick={() => toast.promise(purchasePlan(plan._id), {
+              loading: 'Redirecting...',
+              success: 'Redirected to payment gateway',
+              error: 'Failed to initiate purchase'
+            })}
               className='mt-6 bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-4 rounded-lg transition-colors'
             >
               Buy Now

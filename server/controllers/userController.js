@@ -17,13 +17,13 @@ export const registerUser = async (req, res) => {
   try {
     const userExists = await User.findOne({ email });
     if (userExists) {
-      return res.json({ succes: false, message: "User already exists" });
+      return res.json({ success: false, message: "User already exists" });
     }
 
     const user = await User.create({ name, email, password });
     const token = generateToken(user._id);
 
-    res.json({ succes: true, token });
+    res.json({ success: true, token });
   } catch (error) {
     return res.json({ success: false, message: error.message });
   }
@@ -55,9 +55,10 @@ export const getUser = async (req, res) => {
     const user = req.user;
     return res.json({ success: true, user });
   } catch (error) {
-    return res.json({ sucess: false, message: error.message });
+    return res.json({ success: false, message: error.message });
   }
 }
+
 // API to get published images 
 export const getPublishedImage = async(req, res)=> {
   try{
