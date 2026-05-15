@@ -4,6 +4,23 @@ import User from "../models/User.js"
 import imagekit from "../configs/imageKit.js"
 import openai from '../configs/openai.js'
 
+// Retry logic function
+const retryWithBackoff = async (fn, maxRetries = 3, delay = 1000) => {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            return await fn();
+        } catch (error) {
+            if (error.status === 429 && i < maxRetries - 1) {
+                const waitTime = delay * Math.pow(2, i); // Exponential backoff
+                console.log(`Rate limited. Retrying in ${waitTime}ms...`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+            } else {
+                throw error;
+            }
+        }
+    }
+};
+
 // Text-based AI Chat Message Controller
 export const textMessageController = async (req, res) => {
     try {
@@ -17,14 +34,17 @@ export const textMessageController = async (req, res) => {
         const chat = await Chat.findOne({ userId, _id: chatId })
         chat.messages.push({ role: "user", content: prompt, timestamp: Date.now(), isImage: false })
 
-        const { choices } = await openai.chat.completions.create({
-            model: "gemini-2.0-flash",
-            messages: [
-                {
-                    role: "user",
-                    content: prompt,
-                },
-            ],
+        // Use retry logic with exponential backoff
+        const { choices } = await retryWithBackoff(async () => {
+            return await openai.chat.completions.create({
+                model: "gemini-2.0-flash",
+                messages: [
+                    {
+                        role: "user",
+                        content: prompt,
+                    },
+                ],
+            });
         });
 
         const reply = { role: "assistant", content: choices[0].message.content, timestamp: Date.now(), isImage: false }
@@ -34,7 +54,8 @@ export const textMessageController = async (req, res) => {
         await User.updateOne({ _id: userId }, { $inc: { credits: -1 } })
 
     } catch (error) {
-        res.json({ success: false, message: error.message })
+        console.error("Message error:", error);
+        res.json({ success: false, message: error.message || "Failed to generate response. Please try again." })
     }
 }
 
@@ -85,6 +106,7 @@ export const imageMessageController = async (req, res) => {
         await User.updateOne({ _id: userId }, { $inc: { credits: -2 } })    
 
     } catch (error) {
-        res.json({ success: false, message: error.message })
+        console.error("Image error:", error);
+        res.json({ success: false, message: error.message || "Failed to generate image. Please try again." })
     }
 }
