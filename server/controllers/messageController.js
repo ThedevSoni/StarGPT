@@ -4,7 +4,7 @@ import User from "../models/User.js"
 import imagekit from "../configs/imageKit.js"
 import openai from '../configs/openai.js'
 
-// Queue to manage API requests sequentially
+// Queue to manage API requests sequentially with longer delays
 let requestQueue = [];
 let isProcessing = false;
 
@@ -21,8 +21,8 @@ const processQueue = async () => {
         reject(error);
     }
     
-    // Add delay between requests to Gemini API
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // IMPORTANT: Gemini free tier needs at least 3-5 second delay between requests
+    await new Promise(resolve => setTimeout(resolve, 5000));
     isProcessing = false;
     processQueue();
 };
@@ -34,15 +34,21 @@ const queueRequest = (fn) => {
     });
 };
 
-// Retry logic function with exponential backoff
-const retryWithBackoff = async (fn, maxRetries = 5, delay = 2000) => {
+// Aggressive retry with very long delays for Gemini API
+const retryWithBackoff = async (fn, maxRetries = 10, initialDelay = 3000) => {
     for (let i = 0; i < maxRetries; i++) {
         try {
             return await fn();
         } catch (error) {
-            if ((error.status === 429 || error.code === 'RATE_LIMIT_EXCEEDED') && i < maxRetries - 1) {
-                const waitTime = delay * Math.pow(2, i); // Exponential backoff: 2s, 4s, 8s, 16s, 32s
-                console.log(`Rate limited (attempt ${i + 1}/${maxRetries}). Waiting ${waitTime}ms...`);
+            // Check for rate limit errors
+            const isRateLimit = error.status === 429 || 
+                               error.code === 'RATE_LIMIT_EXCEEDED' || 
+                               error.message?.includes('429') ||
+                               error.message?.includes('rate');
+            
+            if (isRateLimit && i < maxRetries - 1) {
+                const waitTime = initialDelay * Math.pow(2, i); // 3s, 6s, 12s, 24s, 48s...
+                console.log(`🔄 Rate limited (attempt ${i + 1}/${maxRetries}). Waiting ${Math.round(waitTime / 1000)}s...`);
                 await new Promise(resolve => setTimeout(resolve, waitTime));
             } else {
                 throw error;
@@ -64,9 +70,12 @@ export const textMessageController = async (req, res) => {
         const chat = await Chat.findOne({ userId, _id: chatId })
         chat.messages.push({ role: "user", content: prompt, timestamp: Date.now(), isImage: false })
 
-        // Queue the API request to prevent concurrent calls
+        console.log(`📨 Processing text message from user ${userId}...`);
+
+        // Queue the API request with aggressive retry logic
         const { choices } = await queueRequest(() => 
             retryWithBackoff(async () => {
+                console.log(`🚀 Sending request to Gemini API...`);
                 return await openai.chat.completions.create({
                     model: "gemini-2.0-flash",
                     messages: [
@@ -76,7 +85,7 @@ export const textMessageController = async (req, res) => {
                         },
                     ],
                 });
-            })
+            }, 10, 3000)
         );
 
         const reply = { role: "assistant", content: choices[0].message.content, timestamp: Date.now(), isImage: false }
@@ -84,10 +93,11 @@ export const textMessageController = async (req, res) => {
         chat.messages.push(reply)
         await chat.save()
         await User.updateOne({ _id: userId }, { $inc: { credits: -1 } })
+        console.log(`✅ Message processed successfully`);
 
     } catch (error) {
-        console.error("Message error:", error);
-        res.json({ success: false, message: error.message || "Failed to generate response. Please try again." })
+        console.error("❌ Message error:", error.message);
+        res.json({ success: false, message: error.message || "Failed to generate response. Please try again later." })
     }
 }
 
@@ -110,15 +120,23 @@ export const imageMessageController = async (req, res) => {
             isImage: false
         });
 
+        console.log(`🖼️ Processing image generation from user ${userId}...`);
+
         // Encode the prompt
         const encodedPrompt = encodeURIComponent(prompt)
 
         // construct ImageKit AI generated URL
         const generatedImageUrl = `${process.env.IMAGEKIT_URL_ENDPOINT}/ik-genimg-prompt-${encodedPrompt}/stargpt/${Date.now()}.png?tr=w-800,h-800`;
         
-        // Queue image generation request
+        // Queue image generation request with aggressive retry
         const aiImageResponse = await queueRequest(() =>
-            axios.get(generatedImageUrl, { responseType: "arraybuffer" })
+            retryWithBackoff(async () => {
+                console.log(`🚀 Fetching image from ImageKit...`);
+                return await axios.get(generatedImageUrl, { 
+                    responseType: "arraybuffer",
+                    timeout: 60000 
+                });
+            }, 10, 3000)
         );
         
         // Covert to Base64
@@ -140,10 +158,11 @@ export const imageMessageController = async (req, res) => {
         res.json({ success: true, reply })
         chat.messages.push(reply)
         await chat.save()
-        await User.updateOne({ _id: userId }, { $inc: { credits: -2 } })    
+        await User.updateOne({ _id: userId }, { $inc: { credits: -2 } })
+        console.log(`✅ Image generated successfully`);
 
     } catch (error) {
-        console.error("Image error:", error);
-        res.json({ success: false, message: error.message || "Failed to generate image. Please try again." })
+        console.error("❌ Image error:", error.message);
+        res.json({ success: false, message: error.message || "Failed to generate image. Please try again later." })
     }
 }
