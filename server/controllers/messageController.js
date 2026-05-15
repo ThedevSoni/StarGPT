@@ -4,15 +4,45 @@ import User from "../models/User.js"
 import imagekit from "../configs/imageKit.js"
 import openai from '../configs/openai.js'
 
-// Retry logic function
-const retryWithBackoff = async (fn, maxRetries = 3, delay = 1000) => {
+// Queue to manage API requests sequentially
+let requestQueue = [];
+let isProcessing = false;
+
+const processQueue = async () => {
+    if (isProcessing || requestQueue.length === 0) return;
+    
+    isProcessing = true;
+    const { fn, resolve, reject } = requestQueue.shift();
+    
+    try {
+        const result = await fn();
+        resolve(result);
+    } catch (error) {
+        reject(error);
+    }
+    
+    // Add delay between requests to Gemini API
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    isProcessing = false;
+    processQueue();
+};
+
+const queueRequest = (fn) => {
+    return new Promise((resolve, reject) => {
+        requestQueue.push({ fn, resolve, reject });
+        processQueue();
+    });
+};
+
+// Retry logic function with exponential backoff
+const retryWithBackoff = async (fn, maxRetries = 5, delay = 2000) => {
     for (let i = 0; i < maxRetries; i++) {
         try {
             return await fn();
         } catch (error) {
-            if (error.status === 429 && i < maxRetries - 1) {
-                const waitTime = delay * Math.pow(2, i); // Exponential backoff
-                console.log(`Rate limited. Retrying in ${waitTime}ms...`);
+            if ((error.status === 429 || error.code === 'RATE_LIMIT_EXCEEDED') && i < maxRetries - 1) {
+                const waitTime = delay * Math.pow(2, i); // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+                console.log(`Rate limited (attempt ${i + 1}/${maxRetries}). Waiting ${waitTime}ms...`);
                 await new Promise(resolve => setTimeout(resolve, waitTime));
             } else {
                 throw error;
@@ -34,18 +64,20 @@ export const textMessageController = async (req, res) => {
         const chat = await Chat.findOne({ userId, _id: chatId })
         chat.messages.push({ role: "user", content: prompt, timestamp: Date.now(), isImage: false })
 
-        // Use retry logic with exponential backoff
-        const { choices } = await retryWithBackoff(async () => {
-            return await openai.chat.completions.create({
-                model: "gemini-2.0-flash",
-                messages: [
-                    {
-                        role: "user",
-                        content: prompt,
-                    },
-                ],
-            });
-        });
+        // Queue the API request to prevent concurrent calls
+        const { choices } = await queueRequest(() => 
+            retryWithBackoff(async () => {
+                return await openai.chat.completions.create({
+                    model: "gemini-2.0-flash",
+                    messages: [
+                        {
+                            role: "user",
+                            content: prompt,
+                        },
+                    ],
+                });
+            })
+        );
 
         const reply = { role: "assistant", content: choices[0].message.content, timestamp: Date.now(), isImage: false }
         res.json({ success: true, reply })
@@ -83,10 +115,15 @@ export const imageMessageController = async (req, res) => {
 
         // construct ImageKit AI generated URL
         const generatedImageUrl = `${process.env.IMAGEKIT_URL_ENDPOINT}/ik-genimg-prompt-${encodedPrompt}/stargpt/${Date.now()}.png?tr=w-800,h-800`;
-        //Trigger generation by fetching from ImageKit
-        const aiImageResponse = await axios.get(generatedImageUrl, { responseType: "arraybuffer" })
+        
+        // Queue image generation request
+        const aiImageResponse = await queueRequest(() =>
+            axios.get(generatedImageUrl, { responseType: "arraybuffer" })
+        );
+        
         // Covert to Base64
         const base64Image = `data:image/png;base64,${Buffer.from(aiImageResponse.data, "binary").toString('base64')}`;
+        
         //upload to ImageKit
         const uploadResponse = await imagekit.upload({
             file: base64Image,
