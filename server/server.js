@@ -7,18 +7,21 @@ import chatRouter from "./routes/chatRoutes.js"
 import messageRouter from "./routes/messageRoutes.js"
 import creditRouter from "./routes/creditRouter.js"
 import { stripeWebhooks } from "./controllers/webhooks.js"
-
-
+import { apiLimiter } from "./middlewares/rateLimit.js"
 
 const app = express()
 
 await connectDB()
+
 //Stipe webhooks
 app.post('/api/stripe', express.raw({type: 'application/json'}), stripeWebhooks)
 
 // Middleware
 app.use(cors())
 app.use(express.json())
+
+// Apply global rate limiter to API routes
+app.use('/api/', apiLimiter)
 
 // Routes
 app.get('/', (req, res) => res.send('server is Live!'))
